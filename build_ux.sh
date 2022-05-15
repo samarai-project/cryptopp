@@ -1,5 +1,7 @@
+clear
+rm -r build
 mkdir -p build
 cd build
-cmake ..
-cmake --build ./ --config Release
+cmake -D CMAKE_BUILD_TYPE=Release .. 
+cmake --build ./
 cd ..
