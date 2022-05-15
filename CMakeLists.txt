@@ -940,7 +940,7 @@ endif()
 # MacOS target (JKU 2022-05-15)
 #============================================================================
 
-if (APPLE)
+if (APPLE) 
     set(CMAKE_OSX_DEPLOYMENT_TARGET "10.14" CACHE STRING "Minimum OS X deployment version" FORCE)
 endif ()
 
