@@ -14,6 +14,12 @@
 #include "misc.h"
 #include "stdcpp.h"
 
+// For _xgetbv on Microsoft 32-bit and 64-bit Intel platforms
+// https://github.com/weidai11/cryptopp/issues/972
+#if _MSC_VER >= 1600 && (defined(_M_IX86) || defined(_M_X64))
+# include <immintrin.h>
+#endif
+
 #ifdef _AIX
 # include <sys/systemcfg.h>
 #endif
@@ -42,6 +48,7 @@ unsigned long int getauxval(unsigned long int) { return 0; }
 
 #if defined(__APPLE__)
 # include <sys/utsname.h>
+# include <sys/sysctl.h>
 #endif
 
 // The cpu-features header and source file are located in
@@ -134,7 +141,7 @@ class AppleMachineInfo
 {
 public:
 	enum { PowerMac=1, Mac, iPhone, iPod, iPad, AppleTV, AppleWatch };
-	enum { PowerPC=1, I386, I686, X86_64, ARM32, ARMV8, ARMV84 };
+	enum { PowerPC=1, I386, I686, X86_64, ARM32, ARMV8, ARMV82, ARMV83 };
 
 	AppleMachineInfo() : m_device(0), m_version(0), m_arch(0)
 	{
@@ -202,6 +209,39 @@ public:
 			if (m_version >= 4) { m_arch = ARMV8; }
 			else { m_arch = ARM32; }
 		}
+		else if (machine.find("arm64") != std::string::npos)
+		{
+			// M1 machine?
+			std::string brand;
+			size_t size = 0;
+
+			if (sysctlbyname("machdep.cpu.brand_string", NULL, &size, NULL, 0) == 0 && size > 0)
+			{
+				brand.resize(size);
+				if (sysctlbyname("machdep.cpu.brand_string", &brand[0], &size, NULL, 0) == 0 && size > 0)
+				{
+					if (brand[size-1] == '\0')
+						size--;
+					brand.resize(size);
+				}
+			}
+
+			if (brand == "Apple M1")
+			{
+				m_device = Mac;
+				m_arch = ARMV82;
+			}
+			else
+			{
+				// ???
+				m_device = 0;
+				m_arch = ARMV8;
+			}
+		}
+		else
+		{
+			CRYPTOPP_ASSERT(0);
+		}
 	}
 
 	unsigned int Device() const {
@@ -221,11 +261,15 @@ public:
 	}
 
 	bool IsARMv8() const {
-		return m_arch == ARMV8;
+		return m_arch >= ARMV8;
 	}
 
-	bool IsARMv84() const {
-		return m_arch == ARMV84;
+	bool IsARMv82() const {
+		return m_arch >= ARMV82;
+	}
+
+	bool IsARMv83() const {
+		return m_arch >= ARMV83;
 	}
 
 private:
@@ -234,7 +278,7 @@ private:
 
 void GetAppleMachineInfo(unsigned int& device, unsigned int& version, unsigned int& arch)
 {
-#if CRYPTOPP_CXX11_DYNAMIC_INIT
+#if CRYPTOPP_CXX11_STATIC_INIT
 	static const AppleMachineInfo info;
 #else
 	using CryptoPP::Singleton;
@@ -265,7 +309,29 @@ inline bool IsAppleMachineARMv8()
 		unsigned int unused;
 		GetAppleMachineInfo(unused, unused, arch);
 	}
-	return arch == AppleMachineInfo::ARMV8;
+	return arch >= AppleMachineInfo::ARMV8;
+}
+
+inline bool IsAppleMachineARMv82()
+{
+	static unsigned int arch;
+	if (arch == 0)
+	{
+		unsigned int unused;
+		GetAppleMachineInfo(unused, unused, arch);
+	}
+	return arch >= AppleMachineInfo::ARMV82;
+}
+
+inline bool IsAppleMachineARMv83()
+{
+	static unsigned int arch;
+	if (arch == 0)
+	{
+		unsigned int unused;
+		GetAppleMachineInfo(unused, unused, arch);
+	}
+	return arch >= AppleMachineInfo::ARMV83;
 }
 
 #endif  // __APPLE__
@@ -308,8 +374,9 @@ extern bool CPU_ProbeSSE2();
 // https://gcc.gnu.org/bugzilla/show_bug.cgi?id=85684.
 word64 XGetBV(word32 num)
 {
-// Visual Studio 2010 and above, 32 and 64-bit
-#if defined(_MSC_VER) && (_MSC_VER >= 1600)
+// Visual Studio 2010 SP1 and above, 32 and 64-bit
+// https://github.com/weidai11/cryptopp/issues/972
+#if defined(_MSC_VER) && (_MSC_FULL_VER >= 160040219)
 
 	return _xgetbv(num);
 
@@ -349,7 +416,7 @@ word64 XGetBV(word32 num)
 	return (static_cast<word64>(d) << 32) | a;
 
 // Remainder of GCC and compatibles.
-#else
+#elif defined(__GNUC__) || defined(__clang__) || defined(__SUNPRO_CC)
 
 	// https://gcc.gnu.org/bugzilla/show_bug.cgi?id=71659 and
 	// http://www.agner.org/optimize/vectorclass/read.php?i=65
@@ -360,6 +427,8 @@ word64 XGetBV(word32 num)
 		: "=a"(a), "=d"(d) : "c"(num) : "cc"
 	);
 	return (static_cast<word64>(d) << 32) | a;
+#else
+	# error "Need an xgetbv function"
 #endif
 }
 
@@ -671,7 +740,7 @@ bool CRYPTOPP_SECTION_INIT g_hasSM3 = false;
 bool CRYPTOPP_SECTION_INIT g_hasSM4 = false;
 word32 CRYPTOPP_SECTION_INIT g_cacheLineSize = CRYPTOPP_L1_CACHE_LINE_SIZE;
 
-// ARM does not have an unprivliged equivalent to CPUID on IA-32. We have to
+// ARM does not have an unprivileged equivalent to CPUID on IA-32. We have to
 // jump through some hoops to detect features on a wide array of platforms.
 // Our strategy is two part. First, attempt to *Query* the OS for a feature,
 // like using getauxval on Linux. If that fails, then *Probe* the cpu
@@ -811,8 +880,9 @@ inline bool CPU_QueryCRC32()
 	if ((getauxval(AT_HWCAP2) & HWCAP2_CRC32) != 0)
 		return true;
 #elif defined(__APPLE__) && defined(__aarch64__)
-	// No compiler support. CRC intrinsics result in a failed compiled.
-	return false;
+	// M1 processor
+	if (IsAppleMachineARMv82())
+		return true;
 #endif
 	return false;
 }
@@ -834,8 +904,9 @@ inline bool CPU_QueryPMULL()
 	if ((getauxval(AT_HWCAP2) & HWCAP2_PMULL) != 0)
 		return true;
 #elif defined(__APPLE__) && defined(__aarch64__)
-	// No compiler support. PMULL intrinsics result in a failed compiled.
-	return false;
+	// M1 processor
+	if (IsAppleMachineARMv82())
+		return true;
 #endif
 	return false;
 }
@@ -906,32 +977,15 @@ inline bool CPU_QuerySHA256()
 	return false;
 }
 
-inline bool CPU_QuerySHA512()
-{
-// Some ARMv8.4 features are disabled at the moment
-#if defined(__ANDROID__) && defined(__aarch64__) && 0
-	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
-		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_SHA512) != 0))
-		return true;
-#elif defined(__ANDROID__) && defined(__aarch32__) && 0
-	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM) != 0) &&
-		((android_getCpuFeatures() & ANDROID_CPU_ARM_FEATURE_SHA512) != 0))
-		return true;
-#elif defined(__linux__) && defined(__aarch64__)
-	if ((getauxval(AT_HWCAP) & HWCAP_SHA512) != 0)
-		return true;
-#elif defined(__linux__) && defined(__aarch32__)
-	if ((getauxval(AT_HWCAP2) & HWCAP2_SHA512) != 0)
-		return true;
-#elif defined(__APPLE__) && defined(__aarch64__) && 0
-	return false;
-#endif
-	return false;
-}
-
+// Some ARMv8.2 features are disabled at the moment
 inline bool CPU_QuerySHA3()
 {
-// Some ARMv8.4 features are disabled at the moment
+	// According to the ARM manual, SHA3 depends upon SHA1 and SHA2.
+	// If SHA1 and SHA2 are not present, then SHA3 and SHA512 are
+	// not present. Also see Arm A64 Instruction Set Architecture,
+	// https://developer.arm.com/documentation/ddi0596/2020-12/
+	if (!g_hasSHA1 || !g_hasSHA2) { return false; }
+
 #if defined(__ANDROID__) && defined(__aarch64__) && 0
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_SHA3) != 0))
@@ -946,15 +1000,48 @@ inline bool CPU_QuerySHA3()
 #elif defined(__linux__) && defined(__aarch32__)
 	if ((getauxval(AT_HWCAP2) & HWCAP2_SHA3) != 0)
 		return true;
-#elif defined(__APPLE__) && defined(__aarch64__) && 0
-	return false;
+#elif defined(__APPLE__) && defined(__aarch64__)
+	// M1 processor
+	if (IsAppleMachineARMv82())
+		return true;
 #endif
 	return false;
 }
 
+// Some ARMv8.2 features are disabled at the moment
+inline bool CPU_QuerySHA512()
+{
+	// According to the ARM manual, SHA512 depends upon SHA1 and SHA2.
+	// If SHA1 and SHA2 are not present, then SHA3 and SHA512 are
+	// not present. Also see Arm A64 Instruction Set Architecture,
+	// https://developer.arm.com/documentation/ddi0596/2020-12/
+	if (!g_hasSHA1 || !g_hasSHA2) { return false; }
+
+#if defined(__ANDROID__) && defined(__aarch64__) && 0
+	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
+		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_SHA512) != 0))
+		return true;
+#elif defined(__ANDROID__) && defined(__aarch32__) && 0
+	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM) != 0) &&
+		((android_getCpuFeatures() & ANDROID_CPU_ARM_FEATURE_SHA512) != 0))
+		return true;
+#elif defined(__linux__) && defined(__aarch64__)
+	if ((getauxval(AT_HWCAP) & HWCAP_SHA512) != 0)
+		return true;
+#elif defined(__linux__) && defined(__aarch32__)
+	if ((getauxval(AT_HWCAP2) & HWCAP2_SHA512) != 0)
+		return true;
+#elif defined(__APPLE__) && defined(__aarch64__)
+	// M1 processor
+	if (IsAppleMachineARMv82())
+		return true;
+#endif
+	return false;
+}
+
+// Some ARMv8.2 features are disabled at the moment
 inline bool CPU_QuerySM3()
 {
-// Some ARMv8.4 features are disabled at the moment
 #if defined(__ANDROID__) && defined(__aarch64__) && 0
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_SM3) != 0))
@@ -970,14 +1057,14 @@ inline bool CPU_QuerySM3()
 	if ((getauxval(AT_HWCAP2) & HWCAP2_SM3) != 0)
 		return true;
 #elif defined(__APPLE__) && defined(__aarch64__) && 0
-	return false;
+	// No Apple support yet.
 #endif
 	return false;
 }
 
+// Some ARMv8.2 features are disabled at the moment
 inline bool CPU_QuerySM4()
 {
-// Some ARMv8.4 features are disabled at the moment
 #if defined(__ANDROID__) && defined(__aarch64__) && 0
 	if (((android_getCpuFamily() & ANDROID_CPU_FAMILY_ARM64) != 0) &&
 		((android_getCpuFeatures() & ANDROID_CPU_ARM64_FEATURE_SM4) != 0))
@@ -993,7 +1080,7 @@ inline bool CPU_QuerySM4()
 	if ((getauxval(AT_HWCAP2) & HWCAP2_SM4) != 0)
 		return true;
 #elif defined(__APPLE__) && defined(__aarch64__) && 0
-	return false;
+	// No Apple support yet.
 #endif
 	return false;
 }
@@ -1199,6 +1286,13 @@ inline bool CPU_QueryDARN()
 
 void DetectPowerpcFeatures()
 {
+	// GCC 10 is giving us trouble in CPU_ProbePower9() and
+	// CPU_ProbeDARN(). GCC is generating POWER9 instructions
+	// on POWER8 for ppc_power9.cpp. The compiler idiots did
+	// not think through the consequences of requiring us to
+	// use -mcpu=power9 to unlock the ISA. Epic fail.
+	// https://github.com/weidai11/cryptopp/issues/986
+
 	// The CPU_ProbeXXX's return false for OSes which
 	// can't tolerate SIGILL-based probes, like Apple
 	g_hasAltivec  = CPU_QueryAltivec() || CPU_ProbeAltivec();
