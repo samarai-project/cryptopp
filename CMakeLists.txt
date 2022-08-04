@@ -20,12 +20,23 @@ if (APPLE AND APPLE_TARGET_ARCHITECTURE)
     
     if (APPLE_FOUND_ARCHITECTURE STREQUAL "arm64")
         if (APPLE_TARGET_ARCHITECTURE STREQUAL "x86_64")
+            
+            # ATTENTION: When compiling cryptopp for x86 on a arm machine, samarai crashes inside 
+            # StreamIntegrityVerifier::Put -> CryptoPP::SHA256::Update()
+            # The compilation works, but the app later crashes when loading a system, when verifying
+            # the IVA of a source file.
+            # This happens with CryptoPP 8.5, clang 13.1.6 on MacbookPro M1
+            # Workaround as of 2022-08-04: We're using libcryptopp.a that's been compiled on a x86 mac
+            message(FATAL_ERROR "Cannot target x86 on arm64 machine, see CMakeLists.txt for more info")
+            
+            # this is the working (compiling) code
             set(CMAKE_OSX_ARCHITECTURES "x86_64" CACHE STRING "")
             # when targeting x86 on an Apple silicon machine we need to disable ASM or
             # the compilation fails    
             add_compile_definitions(CRYPTOPP_DISABLE_ASM)
             message(WARNING "ASM Support Disabled!")
             message(STATUS "Target architecture: ${APPLE_TARGET_ARCHITECTURE}")
+            
         elseif (APPLE_TARGET_ARCHITECTURE STREQUAL "arm64")
             message("Targeting arm64 on arm64 machine")
         endif()
